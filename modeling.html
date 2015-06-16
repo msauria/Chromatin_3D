@@ -1,0 +1,296 @@
+
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+
+		<style>
+			body {
+				font-family: Monospace;
+				background-color: #222;
+				margin: 0px;
+				overflow: hidden;
+			}
+			a {
+				color: #f80;
+			}
+		</style>
+	</head>
+
+	<body>
+
+		<script src="Scripts/THREE.min.js"></script>
+		<script src="Scripts/TrackballControls.js"></script>
+		<script src="Scripts/Lut.js"></script>
+		<script src="Scripts/dat.gui.min.js"></script>
+		<script src="Data/test.json"></script>
+		<script src="Data/mm9_ESC_CTCF.json"></script>
+		<script src="Data/mm9_ESC_H3K4me3.json"></script>
+		<script>
+
+			if (typeof DNA.chrom == "number"){
+				DNA.chrom = DNA.chrom.toString();
+			}
+			var container;
+
+			var camera, scene, renderer, controls;
+			var effectController = {
+				genomic_position: DNA.positions[DNA.positions.length / 2]
+			}
+			var mesh, new_pos, sites;
+			sites = [];
+
+			init();
+			animate();
+
+			function initGUI() {
+
+				var gui = new dat.GUI();
+
+				gui.add( effectController, "genomic_position", DNA.positions[0], DNA.positions[DNA.positions.length - 1] );
+			}
+
+			function DNA_pos( strand, coordinate ) {
+				var fraction = (coordinate - strand.positions[0]) / (strand.positions[1] - strand.positions[0]);
+				var index = Math.floor(fraction);
+				var index1 = Math.min(index + 1, strand.coordinates.length - 1)
+				fraction -= index;
+				var newPos = new THREE.Vector3();
+				newPos.x = strand.coordinates[index].x * (1.0 - fraction) + strand.coordinates[index1].x * fraction;
+				newPos.y = strand.coordinates[index].y * (1.0 - fraction) + strand.coordinates[index1].y * fraction;
+				newPos.z = strand.coordinates[index].z * (1.0 - fraction) + strand.coordinates[index1].z * fraction;
+				return newPos;
+			}
+
+			function DNA_angle( strand, coordinate ) {
+				var fraction = (coordinate - strand.positions[0]) / (strand.positions[1] - strand.positions[0]);
+				var index = Math.floor(fraction);
+
+				var newPos = new THREE.Vector3();
+				newPos.subVectors(strand.coordinates[index + 1], strand.coordinates[index]);
+				newPos.normalize();
+				return newPos;
+			}
+
+			function update_position( object, new_pos ) {
+				object.position.x = -new_pos.x;
+				object.position.y = -new_pos.y;
+				object.position.z = -new_pos.z;
+			}
+
+
+			function update_site_position( DNA, sites, new_pos ) {
+				var site_pos = new THREE.Vector3();
+				site_pos.subVectors(new_pos, DNA.position);
+				for (var i = 0; i < sites.length; i++ ){
+					sites[i].mesh.position.subVectors(sites[i].position, new_pos);
+				}
+			}
+
+			function load_bed( sites, object, DNA ) {
+				if ( object.hasOwnProperty( DNA.chrom ) ){
+					var mid, pos, site, angle, ang_mat;
+					var origin = new THREE.Vector3(0, 0, 0)
+					var up = new THREE.Vector3( 0, 0, 1)
+					var orient_mat = [
+						new THREE.MeshLambertMaterial( { color: 0xFF0000, wireframe: false, emissive: 0x555555 } ),
+						new THREE.MeshLambertMaterial( { color: 0x0000FF, wireframe: false, emissive: 0x555555 } ),
+						new THREE.MeshLambertMaterial( { color: 0x00FF00, wireframe: false, emissive: 0x555555 } )
+					];
+					chrom = object[DNA.chrom]
+					for (var i = 0; i < chrom.start.length; i++ ){
+						mid = (chrom.start[i] + chrom.stop[i]) / 2;
+						pos = DNA_pos( DNA, mid );
+						angle = DNA_angle( DNA, mid );
+						ang_mat = new THREE.Matrix4;
+						ang_mat.lookAt( origin, angle, up )
+						sites.push( {position:pos, mesh:new THREE.Mesh( new THREE.CylinderGeometry( 1.0, 1.0, 0.1, 12 ), orient_mat[chrom.strand[i]] )} );
+						sites[sites.length - 1].mesh.position.copy(pos);
+						if (angle.y > 0.0){
+							sites[sites.length - 1].mesh.rotation.z = Math.acos(angle.x / Math.pow(Math.pow(angle.x, 2) + Math.pow(angle.y, 2), 0.5)) - Math.PI / 2;
+						} else {
+							sites[sites.length - 1].mesh.rotation.z = 2 * Math.PI - Math.acos(angle.x / Math.pow(Math.pow(angle.x, 2) + Math.pow(angle.y, 2), 0.5)) - Math.PI / 2;
+						}
+						if (angle.x > 0.0){
+							sites[sites.length - 1].mesh.rotation.y = 2 * Math.PI - Math.acos(angle.z / Math.pow(Math.pow(angle.z, 2) + Math.pow(angle.x, 2), 0.5)) - Math.PI / 2;
+						} else {
+							sites[sites.length - 1].mesh.rotation.y = Math.acos(angle.z / Math.pow(Math.pow(angle.z, 2) + Math.pow(angle.x, 2), 0.5)) - Math.PI / 2;
+						}
+					}
+				}
+			}
+
+			function load_bedgraph( bedgraph, DNA, geometry, lut, num_splits, num_faces ) {
+				if ( bedgraph.hasOwnProperty( DNA.chrom ) ){
+					var scores = [];
+					var counts = [];
+					chrom = bedgraph[DNA.chrom]
+					var span = (DNA.positions[1] - DNA.positions[0]) / num_splits;
+					var index, mid;
+					var DNA_start = DNA.positions[0];
+					var DNA_stop = DNA.positions[DNA.positions.length - 1];
+					for (var i = 0; i < DNA.positions.length * num_splits; i++ ){
+						counts[i] = 0;
+						scores[i] = 0.0;
+					}
+					for (var i = 0; i < chrom.start.length; i++ ){
+						mid = (chrom.start[i] + chrom.stop[i]) / 2;
+						if ( mid < DNA_stop ) {
+							index = Math.floor( (mid - DNA_start) / span );
+							scores[index] += chrom.score[i];
+							counts[index] += 1;
+						}
+					}
+					var minscore = 99999999;
+					var maxscore = -99999999;
+					for ( var i = 0; i < counts.length; i++ ) {
+						if ( counts[i] > 0 ) {
+							//scores[i] /= counts[i];
+							minscore = Math.min( minscore, scores[i] );
+							maxscore = Math.max( maxscore, scores[i] );
+						}
+					}
+					lut.setMax( maxscore );
+					lut.setMin( minscore );
+					var invalid_color = new THREE.Color( 0x555555 );
+					var f, n, lutColor;
+					for ( var i = 0; i < counts.length; i++ ) {
+						if ( counts[i] > 0 ) {
+							lutColor = lut.getColor( scores[i] );
+							for ( var j = 0; j < num_faces * 2; j++ ){
+								f = geometry.faces[i * num_faces * 2 + j];
+								n = (f instanceof THREE.Face3) ? 3: 4;
+								for ( var k = 0; k < n; k++ ){
+									f.vertexColors[k] = lutColor;
+								}
+							}
+						} else {
+							for ( var j = 0; j < num_faces * 2; j++ ){
+								f = geometry.faces[i * num_faces * 2 + j];
+								n = (f instanceof THREE.Face3) ? 3: 4;
+								for ( var k = 0; k < n; k++ ){
+									f.vertexColors[k] = invalid_color;
+								}
+							}
+						}
+					}
+				}
+			}
+
+			function update_camera_look( camera, focus ) {
+				camera.lookAt(focus.position);
+			}
+
+			function init() {
+
+				initGUI();
+
+				var info = document.createElement( 'div' );
+				info.style.position = 'absolute';
+				info.style.top = '10px';
+				info.style.width = '100%';
+				info.style.textAlign = 'center';
+				info.style.color = '#fff';
+				info.style.link = '#f80';
+				document.body.appendChild( info );
+
+				renderer = new THREE.WebGLRenderer();
+				renderer.setClearColor( 0x222222 );
+				renderer.setPixelRatio( window.devicePixelRatio );
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				document.body.appendChild( renderer.domElement );
+
+				scene = new THREE.Scene();
+
+				camera = new THREE.PerspectiveCamera( 45, window.innerWidth / window.innerHeight, 1, 1000 );
+				camera.position.set( 0, 0, 500 );
+
+				controls = new THREE.TrackballControls( camera, renderer.domElement );
+				controls.minDistance = 20;
+				controls.maxDistance = 5000;
+
+				scene.add( new THREE.AmbientLight( 0x999999 ) );
+
+				var light = new THREE.PointLight( 0xffffff );
+				light.position.copy( camera.position );
+				scene.add( light );
+
+				var lut = new THREE.Lut( 'cooltowarm', 512 );
+
+				//
+
+
+				var closedSpline = new THREE.SplineCurve3( DNA.coordinates );
+
+				var num_splits = 3;
+				var extrudeSettings = {
+					steps			: DNA.num_points * num_splits,
+					bevelEnabled	: false,
+					extrudePath		: closedSpline
+				};
+
+				var pts = [];
+
+				var num_points = 6;
+				var a;
+				for ( var i = 0; i < num_points; i ++ ) {
+					a = i / (num_points / 2) * Math.PI
+					pts.push( new THREE.Vector2(Math.cos(a), Math.sin(a)) );
+
+				}
+
+				var shape = new THREE.Shape( pts );
+
+				var num_faces = 8;
+				var geometry = new THREE.TubeGeometry( closedSpline, DNA.num_points * num_splits, 0.5, num_faces, false );
+
+				load_bedgraph( LAD, DNA, geometry, lut, num_splits, num_faces );
+
+				var material = new THREE.MeshLambertMaterial( { color: 0xF5F5F5, wireframe: false, vertexColors: THREE.VertexColors } );
+				var material2 = new THREE.MeshLambertMaterial( { color: 0xFF0000, wireframe: false});
+
+				mesh = new THREE.Mesh( geometry, material );
+
+				scene.add( mesh );
+
+				var line_mat = new THREE.MeshLambertMaterial( { color: 0xFFFFFF, wireframe: true });
+				var line_g1 = new THREE.Geometry();
+				line_g1.vertices.push( new THREE.Vector3( -2, 0, 0 ), new THREE.Vector3( 2, 0, 0 ) );
+				var line1 = new THREE.Line( line_g1, line_mat );
+				scene.add( line1 );
+				var line_g2 = new THREE.Geometry();
+				line_g2.vertices.push( new THREE.Vector3( 0, -2, 0 ), new THREE.Vector3( 0, 2, 0 ) );
+				var line2 = new THREE.Line( line_g2, line_mat );
+				scene.add( line2 );
+				var line_g3 = new THREE.Geometry();
+				line_g3.vertices.push( new THREE.Vector3( 0, 0, -2 ), new THREE.Vector3( 0, 0, 2 ) );
+				var line3 = new THREE.Line( line_g3, line_mat );
+				scene.add( line3 );
+
+				load_bed( sites, CTCF, DNA );
+				for (var i = 0; i < sites.length; i++ ){
+					scene.add( sites[i].mesh );
+				}
+
+			}
+
+			function animate() {
+
+				requestAnimationFrame( animate );
+
+				controls.update();
+
+				new_pos = DNA_pos( DNA, effectController.genomic_position );
+				update_site_position(mesh, sites, new_pos);
+				update_position(mesh, new_pos);
+
+				renderer.render( scene, camera );
+
+			}
+
+		</script>
+
+	</body>
+
+</html>
